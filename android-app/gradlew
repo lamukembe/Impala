@@ -1,0 +1,34 @@
+#!/usr/bin/env sh
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+GRADLE_VERSION="8.10.2"
+DIST_PATH="$SCRIPT_DIR/.gradle/wrapper"
+DIST_DIR="$DIST_PATH/gradle-$GRADLE_VERSION"
+DIST_BIN="$DIST_DIR/bin/gradle"
+ZIP_FILE="$DIST_PATH/gradle-$GRADLE_VERSION-bin.zip"
+DIST_URL="https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
+
+mkdir -p "$DIST_PATH"
+
+if [ ! -x "$DIST_BIN" ]; then
+  if [ ! -f "$ZIP_FILE" ]; then
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL "$DIST_URL" -o "$ZIP_FILE"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q "$DIST_URL" -O "$ZIP_FILE"
+    else
+      echo "curl or wget is required to download Gradle."
+      exit 1
+    fi
+  fi
+
+  mkdir -p "$DIST_DIR"
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q -o "$ZIP_FILE" -d "$DIST_PATH"
+  else
+    echo "unzip is required to extract Gradle."
+    exit 1
+  fi
+fi
+
+exec "$DIST_BIN" "$@"
