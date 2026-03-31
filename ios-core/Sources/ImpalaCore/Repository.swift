@@ -13,7 +13,7 @@ public protocol DolibarrAPI {
 }
 
 public protocol ConnectivityChecking {
-    var isOnline: Bool { get set }
+    var isOnlineValue: Bool { get set }
 }
 
 public protocol PushNotifying {
@@ -33,58 +33,35 @@ public protocol QrVerifying {
     func verify(order: DeliveryOrder, scannedToken: String) -> Bool
 }
 
-public enum OfflineAction: Equatable {
-    case createOrder(orderId: UUID)
-    case updateStatus(orderId: UUID, status: OrderStatus, courierId: String?, paymentReference: String?)
-}
-
-public final class OfflineQueue {
-    private(set) var actions: [OfflineAction] = []
-
-    public init() {}
-
-    public func enqueue(_ action: OfflineAction) {
-        actions.append(action)
-    }
-
-    public func drain() -> [OfflineAction] {
-        let snapshot = actions
-        actions.removeAll()
-        return snapshot
-    }
-
-    public var count: Int { actions.count }
-}
-
 public final class OrderRepository {
     private let api: DolibarrAPI
     private let workflow: OrderWorkflow
-    private let pushNotifier: PushNotifying
-    private let whatsAppNotifier: WhatsAppNotifying
-    private let paymentValidator: AirtelPaymentValidating
-    private let qrVerifier: QrVerifying
     private let connectivity: ConnectivityChecking
-    private let offlineQueue: OfflineQueue
+    private let offlineQueue: OfflineSyncQueue
+    private let pushNotifier: PushNotifying
+    private let qrVerifier: QrVerifying
+    private let paymentGateway: AirtelPaymentValidating
+    private let whatsAppNotifier: WhatsAppNotifying
     private var localOrders: [UUID: DeliveryOrder] = [:]
 
     public init(
         api: DolibarrAPI,
         workflow: OrderWorkflow,
-        pushNotifier: PushNotifying,
-        whatsAppNotifier: WhatsAppNotifying,
-        paymentValidator: AirtelPaymentValidating,
-        qrVerifier: QrVerifying,
         connectivity: ConnectivityChecking,
-        offlineQueue: OfflineQueue
+        offlineQueue: OfflineSyncQueue,
+        pushNotifier: PushNotifying,
+        qrVerifier: QrVerifying,
+        paymentGateway: AirtelPaymentValidating,
+        whatsAppNotifier: WhatsAppNotifying
     ) {
         self.api = api
         self.workflow = workflow
-        self.pushNotifier = pushNotifier
-        self.whatsAppNotifier = whatsAppNotifier
-        self.paymentValidator = paymentValidator
-        self.qrVerifier = qrVerifier
         self.connectivity = connectivity
         self.offlineQueue = offlineQueue
+        self.pushNotifier = pushNotifier
+        self.qrVerifier = qrVerifier
+        self.paymentGateway = paymentGateway
+        self.whatsAppNotifier = whatsAppNotifier
     }
 
     public func registerOrder(session: UserSession, order: DeliveryOrder) throws -> DeliveryOrder {
@@ -92,28 +69,28 @@ public final class OrderRepository {
         try validate(order)
         localOrders[order.id] = order
 
-        if connectivity.isOnline {
+        if connectivity.isOnlineValue {
             let created = try api.createOrder(session: session, order: order)
             localOrders[created.id] = created
             pushNotifier.notifyCouriersNewOrder(created)
             return created
-        } else {
-            offlineQueue.enqueue(.createOrder(orderId: order.id))
-            return order
         }
+
+        offlineQueue.enqueue(.createOrder(orderId: order.id))
+        return order
     }
 
     public func courierTakeOrder(session: UserSession, orderId: UUID, courierId: String) throws -> DeliveryOrder {
         try ensureAuthenticated(session)
-        guard let order = localOrders[orderId] else { throw ImpalaError.orderNotFound(orderId) }
-        let updated = try workflow.assignCourier(order: order, courierId: courierId)
-        localOrders[updated.id] = updated
-        return try persistStatus(session: session, order: updated)
+        guard let order = localOrders[orderId] else { throw DomainError.orderNotFound(orderId) }
+        let next = try workflow.assignCourier(order: order, courierId: courierId)
+        localOrders[next.id] = next
+        return try persistStatus(session: session, order: next)
     }
 
     public func requestQrValidation(session: UserSession, orderId: UUID) throws -> DeliveryOrder {
         try ensureAuthenticated(session)
-        guard let order = localOrders[orderId] else { throw ImpalaError.orderNotFound(orderId) }
+        guard let order = localOrders[orderId] else { throw DomainError.orderNotFound(orderId) }
         var waitingQr = try workflow.startQrValidation(order: order)
         waitingQr.qrToken = qrVerifier.generate(orderId: waitingQr.id, recipientPhoneNumber: waitingQr.recipientPhoneNumber)
         localOrders[waitingQr.id] = waitingQr
@@ -126,26 +103,26 @@ public final class OrderRepository {
         scannedToken: String
     ) throws -> DeliveryOrder {
         try ensureAuthenticated(session)
-        guard let order = localOrders[orderId] else { throw ImpalaError.orderNotFound(orderId) }
+        guard let order = localOrders[orderId] else { throw DomainError.orderNotFound(orderId) }
         guard qrVerifier.verify(order: order, scannedToken: scannedToken) else {
-            throw ImpalaError.invalidOrderData("qrToken")
+            throw DomainError.invalidOrderData("qrToken")
         }
-        let waitingPayment = try workflow.validateQr(order: order, scannedToken: scannedToken)
-        localOrders[waitingPayment.id] = waitingPayment
-        return try persistStatus(session: session, order: waitingPayment)
+        let next = try workflow.validateQr(order: order, scannedToken: scannedToken)
+        localOrders[next.id] = next
+        return try persistStatus(session: session, order: next)
     }
 
     public func completeAfterPayment(
         session: UserSession,
-        orderId: UUID,
+        order: DeliveryOrder,
         paymentReference: String
     ) throws -> DeliveryOrder {
         try ensureAuthenticated(session)
-        guard let order = localOrders[orderId] else { throw ImpalaError.orderNotFound(orderId) }
-        guard paymentValidator.validate(orderId: order.id, paymentReference: paymentReference) else {
-            throw ImpalaError.paymentValidationFailed(paymentReference)
+        guard let current = localOrders[order.id] else { throw DomainError.orderNotFound(order.id) }
+        guard paymentGateway.validate(orderId: current.id, paymentReference: paymentReference) else {
+            throw DomainError.paymentValidationFailed(paymentReference)
         }
-        let completed = try workflow.completeAfterPayment(order: order, paymentReference: paymentReference)
+        let completed = try workflow.completeAfterPayment(order: current, paymentReference: paymentReference)
         localOrders[completed.id] = completed
         let persisted = try persistStatus(session: session, order: completed)
         whatsAppNotifier.notifyClient(orderNumber: persisted.orderNumber, recipientPhoneNumber: persisted.recipientPhoneNumber)
@@ -154,10 +131,9 @@ public final class OrderRepository {
 
     public func syncOfflineQueue(session: UserSession) throws -> [DeliveryOrder] {
         try ensureAuthenticated(session)
-        guard connectivity.isOnline else { throw ImpalaError.networkUnavailable }
+        guard connectivity.isOnlineValue else { throw DomainError.networkUnavailable }
 
-        let actions = offlineQueue.drain()
-        for action in actions {
+        for action in offlineQueue.drain() {
             switch action {
             case .createOrder(let orderId):
                 guard let order = localOrders[orderId] else { continue }
@@ -190,85 +166,83 @@ public final class OrderRepository {
 
     public func pendingOrders(session: UserSession) throws -> [DeliveryOrder] {
         try ensureAuthenticated(session)
-        if connectivity.isOnline {
+        if connectivity.isOnlineValue {
             let remote = try api.listOrders(session: session)
-            for order in remote {
-                localOrders[order.id] = order
-            }
+            remote.forEach { localOrders[$0.id] = $0 }
         }
         return localOrders.values.filter { $0.status != .completed && $0.status != .failed }
     }
 
     private func persistStatus(session: UserSession, order: DeliveryOrder) throws -> DeliveryOrder {
-        if connectivity.isOnline {
-            let updated = try api.updateOrderStatus(
+        if connectivity.isOnlineValue {
+            var updated = try api.updateOrderStatus(
                 session: session,
                 orderId: order.id,
                 status: order.status,
                 courierId: order.courierId,
                 paymentReference: order.paymentReference
             )
+            if updated.qrToken == nil {
+                updated.qrToken = order.qrToken
+            }
             localOrders[updated.id] = updated
             return updated
-        } else {
-            offlineQueue.enqueue(.updateStatus(
-                orderId: order.id,
-                status: order.status,
-                courierId: order.courierId,
-                paymentReference: order.paymentReference
-            ))
-            return order
         }
+
+        offlineQueue.enqueue(.updateStatus(
+            orderId: order.id,
+            status: order.status,
+            courierId: order.courierId,
+            paymentReference: order.paymentReference
+        ))
+        return order
     }
 
     private func ensureAuthenticated(_ session: UserSession) throws {
         if session.authToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ImpalaError.unauthorized
+            throw DomainError.unauthorized
         }
     }
 
     private func validate(_ order: DeliveryOrder) throws {
         if order.packageType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ImpalaError.invalidOrderData("packageType")
+            throw DomainError.invalidOrderData("packageType")
         }
-        if order.weightKg <= 0 {
-            throw ImpalaError.invalidOrderData("weightKg")
-        }
-        if order.volumeM3 <= 0 {
-            throw ImpalaError.invalidOrderData("volumeM3")
-        }
+        if order.weightKg <= 0 { throw DomainError.invalidOrderData("weightKg") }
+        if order.volumeM3 <= 0 { throw DomainError.invalidOrderData("volumeM3") }
         if order.collectionLocation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ImpalaError.invalidOrderData("collectionLocation")
+            throw DomainError.invalidOrderData("collectionLocation")
         }
         if order.deliveryAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ImpalaError.invalidOrderData("deliveryAddress")
+            throw DomainError.invalidOrderData("deliveryAddress")
         }
-        if order.packageValue <= 0 {
-            throw ImpalaError.invalidOrderData("packageValue")
-        }
+        if order.packageValue <= 0 { throw DomainError.invalidOrderData("packageValue") }
         if order.recipientPhoneNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ImpalaError.invalidOrderData("recipientPhoneNumber")
+            throw DomainError.invalidOrderData("recipientPhoneNumber")
         }
     }
 }
 
-public final class InMemoryConnectivity: ConnectivityChecking {
-    public var isOnline: Bool
-    public init(isOnline: Bool = true) {
-        self.isOnline = isOnline
+public final class InMemoryConnectivityMonitor: ConnectivityChecking {
+    public var isOnlineValue: Bool
+    public init(isOnlineValue: Bool = true) {
+        self.isOnlineValue = isOnlineValue
+    }
+    public func setOnline(_ value: Bool) {
+        isOnlineValue = value
     }
 }
 
-public final class InMemoryDolibarrAPI: DolibarrAPI {
+public final class InMemoryDolibarrApi: DolibarrAPI {
     private var orders: [UUID: DeliveryOrder] = [:]
 
     public init() {}
 
     public func createOrder(session: UserSession, order: DeliveryOrder) throws -> DeliveryOrder {
-        var copy = order
-        copy.updatedAt = Date()
-        orders[copy.id] = copy
-        return copy
+        var created = order
+        created.updatedAt = Date()
+        orders[created.id] = created
+        return created
     }
 
     public func updateOrderStatus(
@@ -278,17 +252,13 @@ public final class InMemoryDolibarrAPI: DolibarrAPI {
         courierId: String?,
         paymentReference: String?
     ) throws -> DeliveryOrder {
-        guard var order = orders[orderId] else { throw ImpalaError.orderNotFound(orderId) }
-        order.status = status
-        if let courierId {
-            order.courierId = courierId
-        }
-        if let paymentReference {
-            order.paymentReference = paymentReference
-        }
-        order.updatedAt = Date()
-        orders[orderId] = order
-        return order
+        guard var existing = orders[orderId] else { throw DomainError.orderNotFound(orderId) }
+        existing.status = status
+        if let courierId { existing.courierId = courierId }
+        if let paymentReference { existing.paymentReference = paymentReference }
+        existing.updatedAt = Date()
+        orders[orderId] = existing
+        return existing
     }
 
     public func listOrders(session: UserSession) throws -> [DeliveryOrder] {
@@ -312,7 +282,7 @@ public final class InMemoryWhatsAppNotifier: WhatsAppNotifying {
     }
 }
 
-public final class InMemoryPaymentValidator: AirtelPaymentValidating {
+public final class InMemoryPaymentGateway: AirtelPaymentValidating {
     private let validReferences: Set<String>
     public init(validReferences: Set<String>) {
         self.validReferences = validReferences
@@ -322,25 +292,13 @@ public final class InMemoryPaymentValidator: AirtelPaymentValidating {
     }
 }
 
-public final class DefaultQrVerifier: QrVerifying {
+public final class InMemoryQrVerifier: QrVerifying {
     public init() {}
     public func generate(orderId: UUID, recipientPhoneNumber: String) -> String {
-        let raw = "\(orderId.uuidString)|\(recipientPhoneNumber)"
-        return Self.sha256Hex(raw).prefix(32).description
+        QrService.generateToken(orderId: orderId, recipientPhoneNumber: recipientPhoneNumber)
     }
-
     public func verify(order: DeliveryOrder, scannedToken: String) -> Bool {
         guard let token = order.qrToken else { return false }
         return token == scannedToken
-    }
-
-    private static func sha256Hex(_ text: String) -> String {
-        let bytes = [UInt8](text.utf8)
-        var hash = [UInt8](repeating: 0, count: 32)
-        for (index, byte) in bytes.enumerated() {
-            let slot = index % 32
-            hash[slot] = hash[slot] &+ byte &+ UInt8(slot)
-        }
-        return hash.map { String(format: "%02x", $0) }.joined()
     }
 }

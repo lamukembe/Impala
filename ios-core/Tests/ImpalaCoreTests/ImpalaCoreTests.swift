@@ -17,44 +17,47 @@ final class ImpalaCoreTests: XCTestCase {
     }
 
     func testRegisterOrderOfflineQueuesThenSyncs() throws {
-        let api = InMemoryDolibarrApi()
-        let connectivity = InMemoryConnectivityMonitor(isOnlineValue: false)
-        let queue = OfflineSyncQueue()
+        let api = InMemoryDolibarrAPI()
+        let connectivity = InMemoryConnectivity(isOnline: false)
+        let queue = OfflineQueue()
+        let pushNotifier = InMemoryPushNotifier()
         let repository = OrderRepository(
             api: api,
             workflow: OrderWorkflow(),
+            pushNotifier: pushNotifier,
+            whatsAppNotifier: InMemoryWhatsAppNotifier(),
+            paymentValidator: InMemoryPaymentValidator(validReferences: []),
+            qrVerifier: DefaultQrVerifier(),
             connectivity: connectivity,
-            offlineQueue: queue,
-            pushNotifier: InMemoryPushNotifier(),
-            qrVerifier: InMemoryQrVerifier(),
-            paymentGateway: InMemoryPaymentGateway(validReferences: []),
-            whatsAppNotifier: InMemoryWhatsAppNotifier()
+            offlineQueue: queue
         )
 
         let session = UserSession(userId: "courier-01", role: "courier", authToken: "token")
         _ = try repository.registerOrder(session: session, order: baseOrder(orderNumber: "IMP-2002"))
-        XCTAssertEqual(queue.size, 1)
+        XCTAssertEqual(queue.count, 1)
 
-        connectivity.isOnlineValue = true
+        connectivity.isOnline = true
         _ = try repository.syncOfflineQueue(session: session)
-        XCTAssertEqual(queue.size, 0)
+        XCTAssertEqual(queue.count, 0)
+        XCTAssertEqual(pushNotifier.notifications.count, 1)
     }
 
     func testFullDeliveryFlowCompletesAndNotifiesWhatsApp() throws {
+        let whatsApp = InMemoryWhatsAppNotifier()
         let repository = OrderRepository(
-            api: InMemoryDolibarrApi(),
+            api: InMemoryDolibarrAPI(),
             workflow: OrderWorkflow(),
-            connectivity: InMemoryConnectivityMonitor(isOnlineValue: true),
-            offlineQueue: OfflineSyncQueue(),
             pushNotifier: InMemoryPushNotifier(),
-            qrVerifier: InMemoryQrVerifier(),
-            paymentGateway: InMemoryPaymentGateway(validReferences: ["AM-OK"]),
-            whatsAppNotifier: InMemoryWhatsAppNotifier()
+            whatsAppNotifier: whatsApp,
+            paymentValidator: InMemoryPaymentValidator(validReferences: ["AM-OK"]),
+            qrVerifier: DefaultQrVerifier(),
+            connectivity: InMemoryConnectivity(isOnline: true),
+            offlineQueue: OfflineQueue()
         )
 
         let session = UserSession(userId: "courier-02", role: "courier", authToken: "token")
         let created = try repository.registerOrder(session: session, order: baseOrder())
-        let inProgress = try repository.courierTakeOrder(session: session, orderId: created.id)
+        let inProgress = try repository.courierTakeOrder(session: session, orderId: created.id, courierId: session.userId)
         let waitingQr = try repository.requestQrValidation(session: session, orderId: inProgress.id)
         let waitingPayment = try repository.verifyQrAndRequestPayment(
             session: session,
@@ -63,29 +66,30 @@ final class ImpalaCoreTests: XCTestCase {
         )
         let completed = try repository.completeAfterPayment(
             session: session,
-            order: waitingPayment,
+            orderId: waitingPayment.id,
             paymentReference: "AM-OK"
         )
 
         XCTAssertEqual(completed.status, .completed)
         XCTAssertEqual(completed.paymentReference, "AM-OK")
+        XCTAssertEqual(whatsApp.notifications.count, 1)
     }
 
     func testInvalidPaymentThrows() throws {
         let repository = OrderRepository(
-            api: InMemoryDolibarrApi(),
+            api: InMemoryDolibarrAPI(),
             workflow: OrderWorkflow(),
-            connectivity: InMemoryConnectivityMonitor(isOnlineValue: true),
-            offlineQueue: OfflineSyncQueue(),
             pushNotifier: InMemoryPushNotifier(),
-            qrVerifier: InMemoryQrVerifier(),
-            paymentGateway: InMemoryPaymentGateway(validReferences: []),
-            whatsAppNotifier: InMemoryWhatsAppNotifier()
+            whatsAppNotifier: InMemoryWhatsAppNotifier(),
+            paymentValidator: InMemoryPaymentValidator(validReferences: []),
+            qrVerifier: DefaultQrVerifier(),
+            connectivity: InMemoryConnectivity(isOnline: true),
+            offlineQueue: OfflineQueue()
         )
 
         let session = UserSession(userId: "courier-03", role: "courier", authToken: "token")
         let created = try repository.registerOrder(session: session, order: baseOrder(orderNumber: "IMP-2003"))
-        let inProgress = try repository.courierTakeOrder(session: session, orderId: created.id)
+        let inProgress = try repository.courierTakeOrder(session: session, orderId: created.id, courierId: session.userId)
         let waitingQr = try repository.requestQrValidation(session: session, orderId: inProgress.id)
         let waitingPayment = try repository.verifyQrAndRequestPayment(
             session: session,
@@ -96,11 +100,11 @@ final class ImpalaCoreTests: XCTestCase {
         XCTAssertThrowsError(
             try repository.completeAfterPayment(
                 session: session,
-                order: waitingPayment,
+                orderId: waitingPayment.id,
                 paymentReference: "AM-BAD"
             )
         ) { error in
-            guard case DomainError.paymentValidationFailed = error else {
+            guard case ImpalaError.paymentValidationFailed = error else {
                 XCTFail("Unexpected error: \(error)")
                 return
             }

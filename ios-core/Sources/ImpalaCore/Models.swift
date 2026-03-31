@@ -87,7 +87,18 @@ public enum DomainError: Error, Equatable {
     case networkUnavailable
     case invalidOrderData(field: String)
     case unauthorized
-    case orderNotFound
-    case invalidStateTransition
-    case paymentValidationFailed
+    case orderNotFound(UUID)
+    case invalidStateTransition(from: OrderStatus, to: OrderStatus)
+    case paymentValidationFailed(String)
+}
+
+public typealias ImpalaError = DomainError
+
+public func generateOrderNumber(now: Date = Date()) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let raw = formatter.string(from: now)
+        .replacingOccurrences(of: ":", with: "")
+        .replacingOccurrences(of: "-", with: "")
+    return "IMP-\(raw)"
 }

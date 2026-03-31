@@ -166,13 +166,13 @@ final class IOSOrderViewModel: ObservableObject {
     @Published var orders: [DeliveryOrder] = []
 
     private let session = UserSession(userId: "ios-user", role: "courier", authToken: "ios-token")
-    private let connectivity = InMemoryConnectivityMonitor(online: true)
-    private let api = InMemoryDolibarrApi()
+    private let connectivity = InMemoryConnectivity(isOnline: true)
+    private let api = InMemoryDolibarrAPI()
     private let workflow = OrderWorkflow()
-    private let queue = OfflineSyncQueue()
+    private let queue = OfflineQueue()
     private let pushNotifier = InMemoryPushNotifier()
-    private let qrVerifier = InMemoryQrVerifier()
-    private let paymentGateway = InMemoryPaymentGateway(validReferences: ["AM-IOS-1"])
+    private let qrVerifier = DefaultQrVerifier()
+    private let paymentGateway = InMemoryPaymentValidator(validReferences: ["AM-IOS-1"])
     private let whatsAppNotifier = InMemoryWhatsAppNotifier()
     private lazy var repository = OrderRepository(
         api: api,
@@ -233,7 +233,7 @@ final class IOSOrderViewModel: ObservableObject {
         guard let order = orders.first(where: { $0.id == orderId }) else {
             throw NSError(domain: "IMPALA", code: 2, userInfo: [NSLocalizedDescriptionKey: "Commande introuvable"])
         }
-        _ = try repository.completeAfterPayment(session: session, order: order, paymentReference: paymentReference)
+        _ = try repository.completeAfterPayment(session: session, orderId: order.id, paymentReference: paymentReference)
         refresh()
     }
 
