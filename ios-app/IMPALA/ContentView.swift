@@ -233,7 +233,7 @@ final class IOSOrderViewModel: ObservableObject {
         guard let order = orders.first(where: { $0.id == orderId }) else {
             throw NSError(domain: "IMPALA", code: 2, userInfo: [NSLocalizedDescriptionKey: "Commande introuvable"])
         }
-        _ = try repository.completeAfterPayment(session: session, orderId: order.id, paymentReference: paymentReference)
+        _ = try repository.completeAfterPayment(session: session, order: order, paymentReference: paymentReference)
         refresh()
     }
 

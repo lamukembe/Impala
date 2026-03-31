@@ -3,13 +3,6 @@ package com.impala.app.data
 import com.impala.core.ConnectivityMonitor
 import com.impala.core.DeliveryOrder
 import com.impala.core.DolibarrApi
-import com.impala.core.InMemoryPaymentGateway
-import com.impala.core.InMemoryPushNotifier
-import com.impala.core.InMemoryQrVerifier
-import com.impala.core.InMemoryWhatsAppNotifier
-import com.impala.core.OfflineSyncQueue
-import com.impala.core.OrderRepository
-import com.impala.core.OrderWorkflow
 import com.impala.core.OrderStatus
 import com.impala.core.QrVerifier
 import com.impala.core.SecureTokenStore
@@ -87,37 +80,5 @@ class DemoQrVerifier : QrVerifier {
 class DemoPaymentGateway : PaymentGateway {
     override fun validateAirtelMoneyPayment(orderId: String, paymentReference: String): Boolean {
         return paymentReference.startsWith("AM-")
-    }
-}
-
-class AppContainer(
-    val repository: OrderRepository,
-    val defaultSession: UserSession,
-    val connectivityMonitor: DemoConnectivityMonitor
-) {
-    companion object {
-        fun default(): AppContainer {
-            val connectivity = DemoConnectivityMonitor(true)
-            val repository = OrderRepository(
-                api = DemoDolibarrApi(),
-                workflow = OrderWorkflow(),
-                connectivity = connectivity,
-                offlineQueue = OfflineSyncQueue(),
-                pushNotifier = InMemoryPushNotifier(),
-                qrVerifier = InMemoryQrVerifier(),
-                paymentGateway = InMemoryPaymentGateway(setOf("AM-777", "AM-1234")),
-                whatsAppNotifier = InMemoryWhatsAppNotifier()
-            )
-            val session = UserSession(
-                userId = "courier-demo",
-                role = "courier",
-                authToken = "demo-token-1234"
-            )
-            return AppContainer(
-                repository = repository,
-                defaultSession = session,
-                connectivityMonitor = connectivity
-            )
-        }
     }
 }
