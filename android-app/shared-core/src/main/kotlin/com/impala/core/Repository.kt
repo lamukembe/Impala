@@ -181,15 +181,20 @@ class OrderRepository(
         order: DeliveryOrder
     ): DeliveryOrder {
         return if (connectivity.isOnline()) {
-            val updated = api.updateOrderStatus(
+            val remoteUpdated = api.updateOrderStatus(
                 session = session,
                 orderId = order.id,
                 status = order.status,
                 courierId = order.courierId,
                 paymentReference = order.paymentReference
             )
-            localOrders[updated.id] = updated
-            updated
+            val merged = remoteUpdated.copy(
+                courierId = order.courierId ?: remoteUpdated.courierId,
+                qrToken = order.qrToken ?: remoteUpdated.qrToken,
+                paymentReference = order.paymentReference ?: remoteUpdated.paymentReference
+            )
+            localOrders[merged.id] = merged
+            merged
         } else {
             offlineQueue.enqueue(
                 OfflineAction.UpdateStatus(

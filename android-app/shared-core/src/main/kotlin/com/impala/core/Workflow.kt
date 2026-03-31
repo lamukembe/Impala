@@ -10,6 +10,7 @@ sealed class OfflineAction {
         val orderId: String,
         val status: OrderStatus,
         val courierId: String? = null,
+        val qrToken: String? = null,
         val paymentReference: String? = null
     ) : OfflineAction()
 }
