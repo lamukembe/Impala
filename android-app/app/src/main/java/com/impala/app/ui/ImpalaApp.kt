@@ -25,6 +25,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.impala.app.viewmodel.ImpalaUiState
+import com.impala.app.viewmodel.OrderItem
 import com.impala.app.viewmodel.ImpalaViewModel
 import com.impala.core.DeliveryType
 import com.impala.core.OrderStatus
@@ -43,7 +45,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ImpalaApp(viewModel: ImpalaViewModel) {
-    val uiState = viewModel.state
+    val uiState by viewModel.state.collectAsState()
     val snackBarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
 
@@ -185,12 +187,10 @@ private fun NewOrderForm(
             label = { Text("Valeur colis") },
             modifier = Modifier.fillMaxWidth()
         )
-
         DeliveryTypeSelector(
             selected = state.deliveryType,
             onSelect = onDeliveryTypeChange
         )
-
         Button(onClick = onSubmit, modifier = Modifier.fillMaxWidth()) {
             Text("Enregistrer commande")
         }
@@ -247,7 +247,7 @@ private fun OrderHistoryList(
 
 @Composable
 private fun OrderCard(
-    order: ImpalaUiState.OrderItem,
+    order: OrderItem,
     onTakeOrder: () -> Unit,
     onAskQr: () -> Unit,
     onScanQr: (String) -> Unit,

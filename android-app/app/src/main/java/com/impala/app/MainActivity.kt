@@ -11,8 +11,13 @@ import com.impala.app.viewmodel.ImpalaViewModel
 import com.impala.app.viewmodel.ImpalaViewModelFactory
 
 class MainActivity : ComponentActivity() {
+    private val container = AppContainer.default()
     private val viewModel: ImpalaViewModel by viewModels {
-        ImpalaViewModelFactory(AppContainer().repository)
+        ImpalaViewModelFactory(
+            repository = container.repository,
+            session = container.defaultSession,
+            connectivity = container.connectivity
+        )
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
