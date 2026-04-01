@@ -8,12 +8,12 @@ import kotlin.test.assertTrue
 class OrderRepositoryTest {
     private val session = UserSession(
         userId = "courier-42",
-        role = UserRole.COURIER,
+        role = UserRole.COURIER.name,
         authToken = "secure-token-1234"
     )
     private val clientSession = UserSession(
         userId = "client-1",
-        role = UserRole.CLIENT,
+        role = UserRole.CLIENT.name,
         authToken = "secure-token-client"
     )
 
@@ -118,7 +118,7 @@ class OrderRepositoryTest {
 
         assertEquals(OrderStatus.COMPLETED, completed.status)
         assertEquals("TX-AM-777", completed.paymentReference)
-        assertEquals(250.0, completed.paymentRecord?.amount)
+        assertEquals(250.0, completed.paymentRecord?.amount ?: 0.0, 0.0001)
         assertEquals(1, whatsAppNotifier.notifications.size)
         assertTrue(whatsAppNotifier.notifications.first().contains("IMP-1003"))
         assertTrue(realtime.events.any { it.type == RealtimeEventType.DELIVERY_COMPLETED })

@@ -15,7 +15,7 @@ sealed class OfflineAction {
     ) : OfflineAction()
     data class TrackingUpdate(
         val orderId: String,
-        val location: TrackingLocation
+        val snapshot: TrackingSnapshot
     ) : OfflineAction()
 }
 

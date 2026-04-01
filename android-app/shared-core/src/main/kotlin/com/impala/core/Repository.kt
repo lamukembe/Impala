@@ -139,7 +139,12 @@ class OrderRepository(
             throw DomainError.PaymentValidationFailed(paymentReference)
         }
 
-        val completed = workflow.completeAfterPayment(current, paymentValidation)
+        val payment = PaymentRecord(
+            reference = paymentValidation.providerTransactionId ?: paymentReference,
+            amount = paymentValidation.validatedAmount ?: current.packageValue,
+            validatedBy = session.userId
+        )
+        val completed = workflow.completeAfterPayment(current, payment)
         localOrders[completed.id] = completed
         val saved = updateStatus(session, completed)
         notifyClient(saved)
@@ -197,6 +202,12 @@ class OrderRepository(
                         notifyClient(updated)
                     }
                 }
+
+                is OfflineAction.TrackingUpdate -> {
+                    val order = localOrders[action.orderId] ?: return@forEach
+                    val updated = workflow.updateTracking(order, action.snapshot)
+                    localOrders[updated.id] = updated
+                }
             }
         }
         return localOrders.values.toList()
@@ -230,7 +241,11 @@ class OrderRepository(
             val merged = remoteUpdated.copy(
                 courierId = order.courierId ?: remoteUpdated.courierId,
                 qrToken = order.qrToken ?: remoteUpdated.qrToken,
-                paymentReference = order.paymentReference ?: remoteUpdated.paymentReference
+                paymentReference = order.paymentReference ?: remoteUpdated.paymentReference,
+                paymentRecord = order.paymentRecord ?: remoteUpdated.paymentRecord,
+                etaMinutes = order.etaMinutes ?: remoteUpdated.etaMinutes,
+                currentLocation = order.currentLocation ?: remoteUpdated.currentLocation,
+                tracking = if (order.tracking.isNotEmpty()) order.tracking else remoteUpdated.tracking
             )
             localOrders[merged.id] = merged
             merged
@@ -252,8 +267,9 @@ class OrderRepository(
     }
 
     private fun ensureRole(session: UserSession, vararg allowedRoles: UserRole) {
-        if (session.role !in allowedRoles) {
-            throw DomainError.Forbidden(allowedRoles.first(), session.role)
+        val role = UserRole.fromValue(session.role) ?: throw DomainError.InvalidRole(session.role)
+        if (role !in allowedRoles) {
+            throw DomainError.Forbidden(role, allowedRoles.toSet())
         }
     }
 

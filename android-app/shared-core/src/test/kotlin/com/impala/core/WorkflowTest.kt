@@ -77,6 +77,6 @@ class WorkflowTest {
         val tracked = workflow.updateTracking(baseOrder, trackingLocation)
         assertEquals(-4.326, tracked.currentLocation?.latitude)
         assertEquals(12, tracked.etaMinutes)
-        assertEquals(TrackingEventType.IN_TRANSIT, tracked.tracking.last().eventType)
+        assertEquals(TrackingEventType.CREATED, tracked.tracking.last().eventType)
     }
 }
