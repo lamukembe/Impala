@@ -1,0 +1,21 @@
+.DS_Store
+.idea/
+.vscode/
+*.iml
+*.log
+
+# Android
+/android-app/.gradle/
+/android-app/local.properties
+/android-app/**/build/
+/android-app/.kotlin/
+
+# iOS / Swift
+/ios-app/.build/
+/ios-app/DerivedData/
+/ios-core/.build/
+/ios-core/.swiftpm/
+
+# Environment
+.env
+.env.*
