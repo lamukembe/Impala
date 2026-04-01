@@ -17,6 +17,7 @@ Le flux metier implemente respecte vos exigences:
 ## Fonctionnalites incluses
 
 - Authentification par session token.
+- Controle d'acces par roles (`CLIENT`, `COURIER`, `ADMIN`) sur les operations sensibles.
 - Creation de commande avec:
   - type de colis
   - poids
@@ -32,6 +33,21 @@ Le flux metier implemente respecte vos exigences:
 - Verification QR code avant livraison.
 - Validation paiement Airtel Money obligatoire avant completion.
 - Notification WhatsApp automatique du client avec numero de commande.
+- Evenements temps reel metier:
+  - creation commande
+  - affectation livreur
+  - QR demande/valide
+  - paiement valide
+  - livraison terminee
+  - actions offline queue/sync
+- Tracking de livraison:
+  - position latitude/longitude
+  - ETA dynamique
+  - historique de tracking par commande
+- Enregistrement de paiement structure:
+  - reference fournisseur
+  - montant/currency
+  - utilisateur et horodatage de validation
 - Mode hors-ligne:
   - file de commandes locales
   - reprise/synchronisation des actions quand le reseau revient
@@ -72,6 +88,8 @@ Flux recommande:
 3. backend retourne resultat signe;
 4. mobile passe la commande en `COMPLETED` uniquement si validation positive.
 
+Le coeur metier manipule un `PaymentValidationResult` puis construit un `PaymentRecord` persistant dans la commande.
+
 ## Notification WhatsApp
 
 Declencher cote backend pour la fiabilite:
@@ -86,6 +104,7 @@ Declencher cote backend pour la fiabilite:
 - chiffrement local des donnees sensibles (token, references paiement).
 - pinning certificat en production.
 - signature et verification des webhooks entrants.
+- controler strictement les roles d'appel API sur les operations `take`, `qr`, `payment`, `tracking`.
 
 ## Lancer les tests (coeur metier)
 

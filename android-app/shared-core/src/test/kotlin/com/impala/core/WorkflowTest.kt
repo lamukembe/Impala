@@ -15,7 +15,13 @@ class WorkflowTest {
         deliveryAddress = "Limete 7e rue",
         recipientPhoneNumber = "+243900000000",
         deliveryType = DeliveryType.IMMEDIATE,
-        packageValue = 100.0
+        packageValue = 100.0,
+        tracking = listOf(
+            TrackingEvent(
+                eventType = TrackingEventType.CREATED,
+                note = "Commande creee"
+            )
+        )
     )
 
     @Test
@@ -54,8 +60,23 @@ class WorkflowTest {
         val inProgress = workflow.assignCourier(baseOrder, courierId = "courier-1")
         val qrWait = workflow.startQrValidation(inProgress)
         val afterQr = workflow.validateQr(qrWait, qrWait.qrToken.orEmpty())
-        val completed = workflow.completeAfterPayment(afterQr, paymentReference = "AM-123")
+        val payment = PaymentRecord(
+            reference = "TX-123",
+            amount = afterQr.packageValue,
+            validatedBy = "courier-1"
+        )
+        val completed = workflow.completeAfterPayment(afterQr, payment)
         assertEquals(OrderStatus.COMPLETED, completed.status)
-        assertEquals("AM-123", completed.paymentReference)
+        assertEquals("TX-123", completed.paymentReference)
+        assertEquals("TX-123", completed.paymentRecord?.reference)
+    }
+
+    @Test
+    fun `tracking update met a jour position et ETA`() {
+        val trackingLocation = TrackingSnapshot(latitude = -4.326, longitude = 15.313, etaMinutes = 12)
+        val tracked = workflow.updateTracking(baseOrder, trackingLocation)
+        assertEquals(-4.326, tracked.currentLocation?.latitude)
+        assertEquals(12, tracked.etaMinutes)
+        assertEquals(TrackingEventType.IN_TRANSIT, tracked.tracking.last().eventType)
     }
 }

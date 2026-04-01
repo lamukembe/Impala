@@ -13,6 +13,10 @@ sealed class OfflineAction {
         val qrToken: String? = null,
         val paymentReference: String? = null
     ) : OfflineAction()
+    data class TrackingUpdate(
+        val orderId: String,
+        val location: TrackingLocation
+    ) : OfflineAction()
 }
 
 enum class OperationResult {
@@ -79,11 +83,42 @@ class OrderWorkflow {
         )
     }
 
-    fun completeAfterPayment(order: DeliveryOrder, paymentReference: String): DeliveryOrder {
+    fun completeAfterPayment(order: DeliveryOrder, payment: PaymentRecord): DeliveryOrder {
         ensureTransition(order.status, OrderStatus.COMPLETED)
         return order.copy(
             status = OrderStatus.COMPLETED,
-            paymentReference = paymentReference,
+            paymentReference = payment.reference,
+            paymentRecord = payment,
+            tracking = order.tracking + TrackingEvent(
+                eventType = TrackingEventType.DELIVERED,
+                note = "Livraison validee apres paiement ${payment.reference}",
+                position = order.currentLocation
+            ),
+            updatedAt = Instant.now()
+        )
+    }
+
+    fun updateTracking(order: DeliveryOrder, snapshot: TrackingSnapshot): DeliveryOrder {
+        if (order.status == OrderStatus.COMPLETED || order.status == OrderStatus.FAILED) {
+            throw DomainError.InvalidStateTransition(order.status, order.status)
+        }
+        val eventType = when (order.status) {
+            OrderStatus.PENDING -> TrackingEventType.CREATED
+            OrderStatus.IN_PROGRESS -> TrackingEventType.IN_TRANSIT
+            OrderStatus.WAITING_QR_VALIDATION -> TrackingEventType.ARRIVED_AT_DESTINATION
+            OrderStatus.WAITING_PAYMENT -> TrackingEventType.ARRIVED_AT_DESTINATION
+            OrderStatus.COMPLETED -> TrackingEventType.DELIVERED
+            OrderStatus.FAILED -> TrackingEventType.IN_TRANSIT
+        }
+        val point = GeoPoint(snapshot.latitude, snapshot.longitude)
+        return order.copy(
+            currentLocation = point,
+            etaMinutes = snapshot.etaMinutes,
+            tracking = order.tracking + TrackingEvent(
+                eventType = eventType,
+                note = "Tracking update",
+                position = point
+            ),
             updatedAt = Instant.now()
         )
     }
@@ -101,6 +136,13 @@ class OrderWorkflow {
         }
     }
 }
+
+data class TrackingSnapshot(
+    val latitude: Double,
+    val longitude: Double,
+    val speedKmh: Double? = null,
+    val etaMinutes: Int? = null
+)
 
 object QrService {
     fun generateToken(order: DeliveryOrder): String {

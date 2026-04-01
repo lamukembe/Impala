@@ -20,12 +20,16 @@ public protocol PushNotifying {
     func notifyCouriersNewOrder(_ order: DeliveryOrder)
 }
 
+public protocol RealtimeEventPublishing {
+    func publish(_ event: DeliveryRealtimeEvent)
+}
+
 public protocol WhatsAppNotifying {
     func notifyClient(orderNumber: String, recipientPhoneNumber: String)
 }
 
 public protocol AirtelPaymentValidating {
-    func validate(orderId: UUID, paymentReference: String) -> Bool
+    func validate(orderId: UUID, paymentReference: String, amount: Double) -> PaymentValidationResult
 }
 
 public protocol QrVerifying {
@@ -39,6 +43,7 @@ public final class OrderRepository {
     private let connectivity: ConnectivityChecking
     private let offlineQueue: OfflineSyncQueue
     private let pushNotifier: PushNotifying
+    private let realtimePublisher: RealtimeEventPublishing
     private let qrVerifier: QrVerifying
     private let paymentGateway: AirtelPaymentValidating
     private let whatsAppNotifier: WhatsAppNotifying
@@ -50,6 +55,7 @@ public final class OrderRepository {
         connectivity: ConnectivityChecking,
         offlineQueue: OfflineSyncQueue,
         pushNotifier: PushNotifying,
+        realtimePublisher: RealtimeEventPublishing,
         qrVerifier: QrVerifying,
         paymentGateway: AirtelPaymentValidating,
         whatsAppNotifier: WhatsAppNotifying
@@ -59,6 +65,7 @@ public final class OrderRepository {
         self.connectivity = connectivity
         self.offlineQueue = offlineQueue
         self.pushNotifier = pushNotifier
+        self.realtimePublisher = realtimePublisher
         self.qrVerifier = qrVerifier
         self.paymentGateway = paymentGateway
         self.whatsAppNotifier = whatsAppNotifier
@@ -73,28 +80,56 @@ public final class OrderRepository {
             let created = try api.createOrder(session: session, order: order)
             localOrders[created.id] = created
             pushNotifier.notifyCouriersNewOrder(created)
+            publishRealtime(
+                order: created,
+                actorUserId: session.userId,
+                type: .orderCreated,
+                action: "order_registered"
+            )
             return created
         }
 
         offlineQueue.enqueue(.createOrder(orderId: order.id))
+        publishRealtime(
+            order: order,
+            actorUserId: session.userId,
+            type: .offlineActionQueued,
+            action: "offline_create_order_queued"
+        )
         return order
     }
 
     public func courierTakeOrder(session: UserSession, orderId: UUID, courierId: String) throws -> DeliveryOrder {
         try ensureAuthenticated(session)
+        try ensureRole(session, allowed: [.courier, .admin])
         guard let order = localOrders[orderId] else { throw DomainError.orderNotFound(orderId) }
         let next = try workflow.assignCourier(order: order, courierId: courierId)
         localOrders[next.id] = next
-        return try persistStatus(session: session, order: next)
+        let updated = try persistStatus(session: session, order: next)
+        publishRealtime(
+            order: updated,
+            actorUserId: session.userId,
+            type: .orderAssigned,
+            action: "order_taken"
+        )
+        return updated
     }
 
     public func requestQrValidation(session: UserSession, orderId: UUID) throws -> DeliveryOrder {
         try ensureAuthenticated(session)
+        try ensureRole(session, allowed: [.courier, .admin])
         guard let order = localOrders[orderId] else { throw DomainError.orderNotFound(orderId) }
         var waitingQr = try workflow.startQrValidation(order: order)
         waitingQr.qrToken = qrVerifier.generate(orderId: waitingQr.id, recipientPhoneNumber: waitingQr.recipientPhoneNumber)
         localOrders[waitingQr.id] = waitingQr
-        return try persistStatus(session: session, order: waitingQr)
+        let updated = try persistStatus(session: session, order: waitingQr)
+        publishRealtime(
+            order: updated,
+            actorUserId: session.userId,
+            type: .qrValidationStarted,
+            action: "qr_requested"
+        )
+        return updated
     }
 
     public func verifyQrAndRequestPayment(
@@ -103,13 +138,21 @@ public final class OrderRepository {
         scannedToken: String
     ) throws -> DeliveryOrder {
         try ensureAuthenticated(session)
+        try ensureRole(session, allowed: [.courier, .admin])
         guard let order = localOrders[orderId] else { throw DomainError.orderNotFound(orderId) }
         guard qrVerifier.verify(order: order, scannedToken: scannedToken) else {
             throw DomainError.invalidOrderData("qrToken")
         }
         let next = try workflow.validateQr(order: order, scannedToken: scannedToken)
         localOrders[next.id] = next
-        return try persistStatus(session: session, order: next)
+        let updated = try persistStatus(session: session, order: next)
+        publishRealtime(
+            order: updated,
+            actorUserId: session.userId,
+            type: .qrValidated,
+            action: "qr_verified_waiting_payment"
+        )
+        return updated
     }
 
     public func completeAfterPayment(
@@ -118,15 +161,60 @@ public final class OrderRepository {
         paymentReference: String
     ) throws -> DeliveryOrder {
         try ensureAuthenticated(session)
+        try ensureRole(session, allowed: [.courier, .admin])
         guard let current = localOrders[order.id] else { throw DomainError.orderNotFound(order.id) }
-        guard paymentGateway.validate(orderId: current.id, paymentReference: paymentReference) else {
+        let paymentResult = paymentGateway.validate(
+            orderId: current.id,
+            paymentReference: paymentReference,
+            amount: current.packageValue
+        )
+        guard paymentResult.isValid else {
             throw DomainError.paymentValidationFailed(paymentReference)
         }
-        let completed = try workflow.completeAfterPayment(order: current, paymentReference: paymentReference)
+        let payment = PaymentRecord(
+            reference: paymentResult.providerTransactionId ?? paymentReference,
+            amount: paymentResult.validatedAmount ?? current.packageValue,
+            validatedBy: session.userId
+        )
+        let completed = try workflow.completeAfterPayment(order: current, payment: payment)
         localOrders[completed.id] = completed
         let persisted = try persistStatus(session: session, order: completed)
         whatsAppNotifier.notifyClient(orderNumber: persisted.orderNumber, recipientPhoneNumber: persisted.recipientPhoneNumber)
+        publishRealtime(
+            order: persisted,
+            actorUserId: session.userId,
+            type: .paymentValidated,
+            action: "payment_validated"
+        )
+        publishRealtime(
+            order: persisted,
+            actorUserId: session.userId,
+            type: .deliveryCompleted,
+            action: "delivery_completed"
+        )
         return persisted
+    }
+
+    public func updateTracking(
+        session: UserSession,
+        orderId: UUID,
+        latitude: Double,
+        longitude: Double,
+        etaMinutes: Int?
+    ) throws -> DeliveryOrder {
+        try ensureAuthenticated(session)
+        try ensureRole(session, allowed: [.courier, .admin])
+        guard let order = localOrders[orderId] else { throw DomainError.orderNotFound(orderId) }
+        let point = GeoPoint(latitude: latitude, longitude: longitude)
+        let updated = try workflow.appendTracking(order: order, point: point, etaMinutes: etaMinutes)
+        localOrders[updated.id] = updated
+        publishRealtime(
+            order: updated,
+            actorUserId: session.userId,
+            type: .trackingUpdated,
+            action: "tracking_updated"
+        )
+        return updated
     }
 
     public func syncOfflineQueue(session: UserSession) throws -> [DeliveryOrder] {
@@ -140,6 +228,12 @@ public final class OrderRepository {
                 let created = try api.createOrder(session: session, order: order)
                 localOrders[created.id] = created
                 pushNotifier.notifyCouriersNewOrder(created)
+                publishRealtime(
+                    order: created,
+                    actorUserId: session.userId,
+                    type: .offlineActionSynced,
+                    action: "offline_create_order_synced"
+                )
             case .updateStatus(let orderId, let status, let courierId, let paymentReference):
                 let updated = try api.updateOrderStatus(
                     session: session,
@@ -149,6 +243,12 @@ public final class OrderRepository {
                     paymentReference: paymentReference
                 )
                 localOrders[updated.id] = updated
+                publishRealtime(
+                    order: updated,
+                    actorUserId: session.userId,
+                    type: .offlineActionSynced,
+                    action: "offline_status_synced"
+                )
                 if updated.status == .completed {
                     whatsAppNotifier.notifyClient(
                         orderNumber: updated.orderNumber,
@@ -195,12 +295,27 @@ public final class OrderRepository {
             courierId: order.courierId,
             paymentReference: order.paymentReference
         ))
+        publishRealtime(
+            order: order,
+            actorUserId: session.userId,
+            type: .offlineActionQueued,
+            action: "offline_status_queued"
+        )
         return order
     }
 
     private func ensureAuthenticated(_ session: UserSession) throws {
         if session.authToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw DomainError.unauthorized
+        }
+    }
+
+    private func ensureRole(_ session: UserSession, allowed: Set<UserRole>) throws {
+        guard let role = UserRole(rawValue: session.role.lowercased()) else {
+            throw DomainError.invalidRole(session.role)
+        }
+        guard allowed.contains(role) else {
+            throw DomainError.forbidden(actual: role, allowed: allowed)
         }
     }
 
@@ -221,9 +336,30 @@ public final class OrderRepository {
             throw DomainError.invalidOrderData("recipientPhoneNumber")
         }
     }
+
+    private func publishRealtime(
+        order: DeliveryOrder,
+        actorUserId: String,
+        type: RealtimeEventType,
+        action: String
+    ) {
+        realtimePublisher.publish(
+            DeliveryRealtimeEvent(
+                orderId: order.id,
+                orderNumber: order.orderNumber,
+                type: type,
+                actorUserId: actorUserId,
+                payload: [
+                    "status": order.status.rawValue,
+                    "action": action
+                ],
+                emittedAt: order.updatedAt
+            )
+        )
+    }
 }
 
-public final class InMemoryConnectivityMonitor: ConnectivityChecking {
+public final class InMemoryConnectivity: ConnectivityChecking {
     public var isOnlineValue: Bool
     public init(isOnlineValue: Bool = true) {
         self.isOnlineValue = isOnlineValue
@@ -274,6 +410,14 @@ public final class InMemoryPushNotifier: PushNotifying {
     }
 }
 
+public final class InMemoryRealtimeEventBus: RealtimeEventPublishing {
+    public private(set) var events: [DeliveryRealtimeEvent] = []
+    public init() {}
+    public func publish(_ event: DeliveryRealtimeEvent) {
+        events.append(event)
+    }
+}
+
 public final class InMemoryWhatsAppNotifier: WhatsAppNotifying {
     public private(set) var notifications: [String] = []
     public init() {}
@@ -287,8 +431,14 @@ public final class InMemoryPaymentGateway: AirtelPaymentValidating {
     public init(validReferences: Set<String>) {
         self.validReferences = validReferences
     }
-    public func validate(orderId: UUID, paymentReference: String) -> Bool {
-        validReferences.contains(paymentReference) || validReferences.contains("\(orderId.uuidString)|\(paymentReference)")
+    public func validate(orderId: UUID, paymentReference: String, amount: Double) -> PaymentValidationResult {
+        let valid = validReferences.contains(paymentReference) ||
+            validReferences.contains("\(orderId.uuidString)|\(paymentReference)")
+        return PaymentValidationResult(
+            isValid: valid,
+            providerTransactionId: valid ? "TX-\(paymentReference)" : nil,
+            validatedAmount: valid ? amount : nil
+        )
     }
 }
 

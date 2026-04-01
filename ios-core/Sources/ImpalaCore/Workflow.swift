@@ -32,11 +32,43 @@ public final class OrderWorkflow {
         return next
     }
 
-    public func completeAfterPayment(order: DeliveryOrder, paymentReference: String) throws -> DeliveryOrder {
+    public func completeAfterPayment(order: DeliveryOrder, payment: PaymentRecord) throws -> DeliveryOrder {
         try ensureTransition(from: order.status, to: .completed)
         var next = order
         next.status = .completed
-        next.paymentReference = paymentReference
+        next.paymentReference = payment.reference
+        next.paymentRecord = payment
+        next.tracking.append(
+            TrackingEvent(
+                eventType: .delivered,
+                note: "Livraison validee apres paiement \(payment.reference)",
+                position: next.currentLocation
+            )
+        )
+        next.updatedAt = Date()
+        return next
+    }
+
+    public func updateTracking(order: DeliveryOrder, snapshot: TrackingSnapshot) throws -> DeliveryOrder {
+        if order.status == .completed || order.status == .failed {
+            throw ImpalaError.invalidStateTransition(from: order.status, to: order.status)
+        }
+        var next = order
+        let point = GeoPoint(latitude: snapshot.latitude, longitude: snapshot.longitude, accuracyMeters: snapshot.accuracyMeters)
+        next.currentLocation = point
+        next.etaMinutes = snapshot.etaMinutes
+        let eventType: TrackingEventType = {
+            switch order.status {
+            case .pending: return .created
+            case .inProgress: return .inTransit
+            case .waitingQrValidation, .waitingPayment: return .arrivedAtDestination
+            case .completed: return .delivered
+            case .failed: return .inTransit
+            }
+        }()
+        next.tracking.append(
+            TrackingEvent(eventType: eventType, note: "Tracking update", position: point)
+        )
         next.updatedAt = Date()
         return next
     }

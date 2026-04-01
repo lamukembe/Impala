@@ -31,6 +31,10 @@ public struct DeliveryOrder: Codable, Equatable, Identifiable {
     public var courierId: String?
     public var qrToken: String?
     public var paymentReference: String?
+    public var paymentRecord: PaymentRecord?
+    public var etaMinutes: Int?
+    public var currentLocation: GeoPoint?
+    public var tracking: [TrackingEvent]
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -49,6 +53,10 @@ public struct DeliveryOrder: Codable, Equatable, Identifiable {
         courierId: String? = nil,
         qrToken: String? = nil,
         paymentReference: String? = nil,
+        paymentRecord: PaymentRecord? = nil,
+        etaMinutes: Int? = nil,
+        currentLocation: GeoPoint? = nil,
+        tracking: [TrackingEvent] = [],
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -66,6 +74,10 @@ public struct DeliveryOrder: Codable, Equatable, Identifiable {
         self.courierId = courierId
         self.qrToken = qrToken
         self.paymentReference = paymentReference
+        self.paymentRecord = paymentRecord
+        self.etaMinutes = etaMinutes
+        self.currentLocation = currentLocation
+        self.tracking = tracking
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -87,6 +99,8 @@ public enum DomainError: Error, Equatable {
     case networkUnavailable
     case invalidOrderData(field: String)
     case unauthorized
+    case forbidden(actual: UserRole, allowed: [UserRole])
+    case invalidRole(String)
     case orderNotFound(UUID)
     case invalidStateTransition(from: OrderStatus, to: OrderStatus)
     case paymentValidationFailed(String)

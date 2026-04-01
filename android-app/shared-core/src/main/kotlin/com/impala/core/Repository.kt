@@ -23,12 +23,16 @@ interface PushNotifier {
     fun notifyCouriersNewOrder(order: DeliveryOrder)
 }
 
+interface RealtimeEventBus {
+    fun publish(event: DeliveryRealtimeEvent)
+}
+
 interface WhatsAppNotifier {
     fun notifyClientDeliveryConfirmed(orderNumber: String, recipientPhoneNumber: String)
 }
 
 interface PaymentGateway {
-    fun validateAirtelMoneyPayment(orderId: String, paymentReference: String): Boolean
+    fun validateAirtelMoneyPayment(orderId: String, paymentReference: String, amount: Double): PaymentValidationResult
 }
 
 interface QrVerifier {
@@ -56,6 +60,7 @@ class OrderRepository(
     private val connectivity: ConnectivityMonitor,
     private val offlineQueue: OfflineSyncQueue,
     private val pushNotifier: PushNotifier,
+    private val realtimeEventBus: RealtimeEventBus,
     private val qrVerifier: QrVerifier,
     private val paymentGateway: PaymentGateway,
     private val whatsAppNotifier: WhatsAppNotifier,
@@ -65,6 +70,7 @@ class OrderRepository(
 
     fun registerOrder(session: UserSession, order: DeliveryOrder): DeliveryOrder {
         ensureAuthenticated(session)
+        ensureRole(session, UserRole.CLIENT, UserRole.ADMIN)
         validator.validate(order)
         localOrders[order.id] = order
 
@@ -72,6 +78,7 @@ class OrderRepository(
             val createdOrder = api.createOrder(session, order)
             localOrders[createdOrder.id] = createdOrder
             pushNotifier.notifyCouriersNewOrder(createdOrder)
+            publishOrderEvent(createdOrder, "order_registered")
             createdOrder
         } else {
             offlineQueue.enqueue(OfflineAction.CreateOrder(order.id))
@@ -81,20 +88,22 @@ class OrderRepository(
 
     fun courierTakeOrder(session: UserSession, orderId: String, courierId: String = session.userId): DeliveryOrder {
         ensureAuthenticated(session)
+        ensureRole(session, UserRole.COURIER, UserRole.ADMIN)
         val order = getLocalOrder(orderId)
         val next = workflow.assignCourier(order, courierId)
         localOrders[next.id] = next
-        return updateStatus(session, next)
+        return updateStatus(session, next).also { publishOrderEvent(it, "order_taken") }
     }
 
     fun requestQrValidation(session: UserSession, orderId: String): DeliveryOrder {
         ensureAuthenticated(session)
+        ensureRole(session, UserRole.COURIER, UserRole.ADMIN)
         val order = getLocalOrder(orderId)
         val waitingQr = workflow.startQrValidation(order)
         val qrToken = qrVerifier.generateQrToken(waitingQr.id, waitingQr.recipientPhoneNumber)
         val withVerifierToken = waitingQr.copy(qrToken = qrToken)
         localOrders[withVerifierToken.id] = withVerifierToken
-        return updateStatus(session, withVerifierToken)
+        return updateStatus(session, withVerifierToken).also { publishOrderEvent(it, "qr_requested") }
     }
 
     fun verifyQrAndRequestPayment(
@@ -103,13 +112,14 @@ class OrderRepository(
         scannedToken: String
     ): DeliveryOrder {
         ensureAuthenticated(session)
+        ensureRole(session, UserRole.COURIER, UserRole.ADMIN)
         val order = getLocalOrder(orderId)
         if (!qrVerifier.verifyQrToken(order, scannedToken)) {
             throw DomainError.InvalidOrderData("qrToken")
         }
         val next = workflow.validateQr(order, scannedToken)
         localOrders[next.id] = next
-        return updateStatus(session, next)
+        return updateStatus(session, next).also { publishOrderEvent(it, "qr_verified_waiting_payment") }
     }
 
     fun completeAfterPayment(
@@ -118,17 +128,46 @@ class OrderRepository(
         paymentReference: String
     ): DeliveryOrder {
         ensureAuthenticated(session)
+        ensureRole(session, UserRole.COURIER, UserRole.ADMIN)
         val current = getLocalOrder(order.id)
-        val isValid = paymentGateway.validateAirtelMoneyPayment(order.id, paymentReference)
-        if (!isValid) {
+        val paymentValidation = paymentGateway.validateAirtelMoneyPayment(
+            orderId = order.id,
+            paymentReference = paymentReference,
+            amount = current.packageValue
+        )
+        if (!paymentValidation.isValid) {
             throw DomainError.PaymentValidationFailed(paymentReference)
         }
 
-        val completed = workflow.completeAfterPayment(current, paymentReference)
+        val completed = workflow.completeAfterPayment(current, paymentValidation)
         localOrders[completed.id] = completed
         val saved = updateStatus(session, completed)
         notifyClient(saved)
+        publishOrderEvent(saved, "delivery_completed")
         return saved
+    }
+
+    fun updateTracking(
+        session: UserSession,
+        orderId: String,
+        latitude: Double,
+        longitude: Double,
+        speedKmh: Double? = null,
+        etaMinutes: Int? = null
+    ): DeliveryOrder {
+        ensureAuthenticated(session)
+        ensureRole(session, UserRole.COURIER, UserRole.ADMIN)
+        val order = getLocalOrder(orderId)
+        val tracking = TrackingSnapshot(
+            latitude = latitude,
+            longitude = longitude,
+            speedKmh = speedKmh,
+            etaMinutes = etaMinutes
+        )
+        val updated = workflow.updateTracking(order, tracking)
+        localOrders[updated.id] = updated
+        publishOrderEvent(updated, "tracking_updated")
+        return updated
     }
 
     fun syncOfflineQueue(session: UserSession): List<DeliveryOrder> {
@@ -212,6 +251,12 @@ class OrderRepository(
         if (session.authToken.isBlank()) throw DomainError.Unauthorized()
     }
 
+    private fun ensureRole(session: UserSession, vararg allowedRoles: UserRole) {
+        if (session.role !in allowedRoles) {
+            throw DomainError.Forbidden(allowedRoles.first(), session.role)
+        }
+    }
+
     private fun getLocalOrder(orderId: String): DeliveryOrder {
         return localOrders[orderId] ?: throw DomainError.OrderNotFound(orderId)
     }
@@ -220,6 +265,30 @@ class OrderRepository(
         whatsAppNotifier.notifyClientDeliveryConfirmed(
             orderNumber = order.orderNumber,
             recipientPhoneNumber = order.recipientPhoneNumber
+        )
+    }
+
+    private fun publishOrderEvent(order: DeliveryOrder, action: String) {
+        realtimeEventBus.publish(
+            DeliveryRealtimeEvent(
+                orderId = order.id,
+                orderNumber = order.orderNumber,
+                type = when (action) {
+                    "order_registered" -> RealtimeEventType.ORDER_CREATED
+                    "order_taken" -> RealtimeEventType.ORDER_ASSIGNED
+                    "qr_requested" -> RealtimeEventType.QR_VALIDATION_STARTED
+                    "qr_verified_waiting_payment" -> RealtimeEventType.QR_VALIDATED
+                    "delivery_completed" -> RealtimeEventType.DELIVERY_COMPLETED
+                    "tracking_updated" -> RealtimeEventType.TRACKING_UPDATED
+                    else -> RealtimeEventType.ORDER_CREATED
+                },
+                actorUserId = order.courierId ?: "system",
+                payload = mapOf(
+                    "status" to order.status.name,
+                    "action" to action
+                ),
+                emittedAt = order.updatedAt
+            )
         )
     }
 }
@@ -273,6 +342,14 @@ class InMemoryPushNotifier : PushNotifier {
     }
 }
 
+class InMemoryRealtimeEventBus : RealtimeEventBus {
+    val events = mutableListOf<DeliveryRealtimeEvent>()
+
+    override fun publish(event: DeliveryRealtimeEvent) {
+        events += event
+    }
+}
+
 class InMemoryWhatsAppNotifier : WhatsAppNotifier {
     val notifications = mutableListOf<String>()
 
@@ -293,8 +370,17 @@ class InMemoryQrVerifier : QrVerifier {
 }
 
 class InMemoryPaymentGateway(private val validReferences: Set<String> = emptySet()) : PaymentGateway {
-    override fun validateAirtelMoneyPayment(orderId: String, paymentReference: String): Boolean {
-        return validReferences.contains("$orderId|$paymentReference") || validReferences.contains(paymentReference)
+    override fun validateAirtelMoneyPayment(
+        orderId: String,
+        paymentReference: String,
+        amount: Double
+    ): PaymentValidationResult {
+        val valid = validReferences.contains("$orderId|$paymentReference") || validReferences.contains(paymentReference)
+        return PaymentValidationResult(
+            isValid = valid,
+            providerTransactionId = if (valid) "TX-$paymentReference" else null,
+            validatedAmount = if (valid) amount else null
+        )
     }
 }
 

@@ -165,14 +165,15 @@ struct ContentView: View {
 final class IOSOrderViewModel: ObservableObject {
     @Published var orders: [DeliveryOrder] = []
 
-    private let session = UserSession(userId: "ios-user", role: "courier", authToken: "ios-token")
-    private let connectivity = InMemoryConnectivity(isOnline: true)
-    private let api = InMemoryDolibarrAPI()
+    private let session = UserSession(userId: "ios-user", role: "COURIER", authToken: "ios-token")
+    private let connectivity = InMemoryConnectivityMonitor(isOnlineValue: true)
+    private let api = InMemoryDolibarrApi()
     private let workflow = OrderWorkflow()
-    private let queue = OfflineQueue()
+    private let queue = OfflineSyncQueue()
     private let pushNotifier = InMemoryPushNotifier()
-    private let qrVerifier = DefaultQrVerifier()
-    private let paymentGateway = InMemoryPaymentValidator(validReferences: ["AM-IOS-1"])
+    private let realtime = InMemoryRealtimeEventBus()
+    private let qrVerifier = InMemoryQrVerifier()
+    private let paymentGateway = InMemoryPaymentGateway(validReferences: ["AM-IOS-1"])
     private let whatsAppNotifier = InMemoryWhatsAppNotifier()
     private lazy var repository = OrderRepository(
         api: api,
@@ -180,6 +181,7 @@ final class IOSOrderViewModel: ObservableObject {
         connectivity: connectivity,
         offlineQueue: queue,
         pushNotifier: pushNotifier,
+        realtimePublisher: realtime,
         qrVerifier: qrVerifier,
         paymentGateway: paymentGateway,
         whatsAppNotifier: whatsAppNotifier
